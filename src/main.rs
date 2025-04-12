@@ -23,6 +23,7 @@ fn main() {
         .add_systems(Update, file_drag_and_drop_system)
         .add_systems(Update, status_update_system)
         .add_systems(Update, display_image_system)
+        .add_systems(Update, keyboard_navigation_system)
         .add_systems(Startup, setup)
         .insert_resource(RarImageState::default())
         .run();
@@ -143,10 +144,12 @@ struct RarImageState {
     found_images: Vec<String>,
     status: RarProcessingStatus,
     last_processed: f64, // Time when the last file was processed
-    // New fields for image display
-    first_image_data: Option<Vec<u8>>,
+    // Image display fields
+    current_image_data: Option<Vec<u8>>, // Data for the currently displayed image
+    current_image_index: usize,         // Index of the currently displayed image
     texture_handle: Option<Handle<Image>>,
     image_loaded: bool,
+    needs_reload: bool,                 // Flag to indicate the image needs to be reloaded
 }
 
 impl Default for RarImageState {
@@ -156,9 +159,11 @@ impl Default for RarImageState {
             found_images: Vec::new(),
             status: RarProcessingStatus::default(),
             last_processed: 0.0,
-            first_image_data: None,
+            current_image_data: None,
+            current_image_index: 0,
             texture_handle: None,
             image_loaded: false,
+            needs_reload: false,
         }
     }
 }
@@ -194,7 +199,6 @@ fn file_drag_and_drop_system(
                     rar_state.status = RarProcessingStatus::Loading;
                     rar_state.current_rar_path = Some(path_buf.clone());
                     rar_state.found_images.clear();
-                    rar_state.first_image_data = None;
                     rar_state.image_loaded = false;
                     rar_state.last_processed = current_time;
 
@@ -208,7 +212,9 @@ fn file_drag_and_drop_system(
 
                             // Update the state with success
                             rar_state.found_images = images;
-                            rar_state.first_image_data = Some(image_data);
+                            rar_state.current_image_data = Some(image_data);
+                            rar_state.current_image_index = 0;
+                            rar_state.needs_reload = true;
                             rar_state.status = RarProcessingStatus::Success;
                         }
                         Err(e) => {
@@ -465,7 +471,7 @@ fn display_image_system(
     image_query: Query<Entity, With<DisplayImage>>,
 ) {
     // Check if we have image data available and it's not yet loaded
-    if let Some(image_data) = &rar_state.first_image_data {
+    if let Some(image_data) = &rar_state.current_image_data {
         if !rar_state.image_loaded {
             info!(
                 "Loading image data ({} bytes) into texture",
@@ -507,15 +513,9 @@ fn display_image_system(
                     }
 
                     // Calculate a scale to fit the image nicely in the window
-                    // Calculate a scale to fit the image nicely in the window
                     // This is a simple heuristic, could be improved based on window size
                     let max_dimension = f32::max(width as f32, height as f32);
                     let scale_factor = 800.0 / max_dimension; // Scale to fit in a 800px area
-
-                    // Clean up any existing display sprites first
-                    for entity in image_query.iter() {
-                        commands.entity(entity).despawn();
-                    }
 
                     // Create a new sprite with our image using SpriteBundle
                     commands.spawn((
@@ -539,7 +539,6 @@ fn display_image_system(
                     error!("Failed to load image data: {}", e);
                     rar_state.status =
                         RarProcessingStatus::Error(format!("Failed to load image: {}", e));
-                    rar_state.first_image_data = None; // Clear the data so we don't keep trying
                 }
             }
         }
@@ -553,4 +552,99 @@ fn display_image_system(
             rar_state.texture_handle = None;
         }
     }
+}
+
+// System to handle keyboard input for navigating between images
+fn keyboard_navigation_system(
+    keyboard_input: Res<ButtonInput<KeyCode>>,
+    mut rar_state: ResMut<RarImageState>,
+) {
+    // Only process keyboard input if we have images loaded
+    if rar_state.found_images.is_empty() {
+        return;
+    }
+
+    let image_count = rar_state.found_images.len();
+    let mut new_index = rar_state.current_image_index;
+    let mut changed = false;
+
+    // Check for right arrow key (next image)
+    if keyboard_input.just_pressed(KeyCode::ArrowRight) {
+        new_index = (rar_state.current_image_index + 1) % image_count;
+        changed = true;
+    }
+
+    // Check for left arrow key (previous image)
+    if keyboard_input.just_pressed(KeyCode::ArrowLeft) {
+        new_index = if rar_state.current_image_index == 0 {
+            image_count - 1
+        } else {
+            rar_state.current_image_index - 1
+        };
+        changed = true;
+    }
+
+    // If the index changed, update the state and trigger a reload
+    if changed && new_index != rar_state.current_image_index {
+        info!("Navigating to image {}/{}", new_index + 1, image_count);
+        rar_state.current_image_index = new_index;
+        
+        // Load the new image data
+        if let Some(path) = &rar_state.current_rar_path {
+            match load_image_by_index(path, new_index, &rar_state.found_images) {
+                Ok(image_data) => {
+                    rar_state.current_image_data = Some(image_data);
+                    rar_state.image_loaded = false;
+                    rar_state.needs_reload = true;
+                }
+                Err(e) => {
+                    error!("Failed to load image {}: {}", new_index, e);
+                    rar_state.status = RarProcessingStatus::Error(format!("Failed to load image {}: {}", new_index, e));
+                }
+            }
+        }
+    }
+}
+
+// Helper function to load a specific image from the RAR file by index
+fn load_image_by_index(
+    path: &Path,
+    index: usize,
+    image_files: &[String],
+) -> Result<Vec<u8>, RarProcessingError> {
+    if index >= image_files.len() {
+        return Err(RarProcessingError::ExtractionError(format!(
+            "Image index {} out of bounds (max: {})",
+            index,
+            image_files.len() - 1
+        )));
+    }
+
+    let target_filename = &image_files[index];
+    info!("Loading image at index {}: {}", index, target_filename);
+
+    // Read through the archive header by header
+    let mut archive = Archive::new(path).open_for_processing()?;
+    let mut image_data = Vec::new();
+
+    while let Some(header) = archive.read_header()? {
+        let filename = header.entry().filename.as_os_str().to_str().unwrap_or_default();
+
+        if filename == target_filename {
+            let (data, _) = header.read()?;
+            image_data = data;
+            break;
+        } else {
+            archive = header.skip()?;
+        }
+    }
+
+    if image_data.is_empty() {
+        return Err(RarProcessingError::ExtractionError(format!(
+            "Failed to find or extract image: {}",
+            target_filename
+        )));
+    }
+
+    Ok(image_data)
 }
