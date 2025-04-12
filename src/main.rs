@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 // Added for finding external unrar executable
 use std::fmt;
 use std::fs;
-use unrar::{error::UnrarError, Archive, ListSplit};
+use unrar::{error::UnrarError, Archive};
 
 // Constants
 const MAX_RAR_FILE_SIZE: u64 = 100 * 1024 * 1024; // 100 MB
@@ -105,8 +105,6 @@ impl fmt::Display for RarProcessingStatus {
 #[derive(Debug)]
 enum RarProcessingError {
     OpenError(UnrarError),
-    HeaderError(UnrarError),
-    EncodingError,
     FileTooLarge(u64),
     NoImagesFound,
     ExtractionError(String),
@@ -116,8 +114,6 @@ impl fmt::Display for RarProcessingError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             RarProcessingError::OpenError(e) => write!(f, "Failed to open RAR file: {}", e),
-            RarProcessingError::HeaderError(e) => write!(f, "Failed to read RAR header: {}", e),
-            RarProcessingError::EncodingError => write!(f, "Failed to decode filename encoding"),
             RarProcessingError::FileTooLarge(size) => write!(
                 f,
                 "RAR file is too large ({} MB). Maximum allowed size is {} MB",
@@ -262,59 +258,32 @@ fn process_rar_file(path: &Path) -> Result<(Vec<String>, Vec<u8>), RarProcessing
 
     // Process the RAR file and extract image filenames
     let mut images = Vec::new();
-    let mut first_image_name = None;
-    let mut possible_error = None;
-    match Archive::new(path).break_open::<ListSplit>(Some(&mut possible_error)) {
-        Ok(archive) => {
-            if let Some(error) = possible_error {
-                // If the error's data field holds an OpenArchive, an error occurred while opening,
-                // the archive is partly broken (e.g. broken header), but is still readable from.
-                // We're going to use the archive and list its contents, but log the warning.
-                warn!("Partial RAR error: {}, continuing with extraction", error);
-            }
-            for entry in archive {
-                match entry {
-                    Ok(e) => {
-                        // Get the filename from the entry
-                        let filename = e.filename;
-                        // Convert filename to string, handle encoding errors
-                        let filename_str = match filename.to_str() {
-                            Some(name) => name.to_string(),
-                            None => {
-                                warn!("Failed to decode filename encoding");
-                                return Err(RarProcessingError::EncodingError);
-                            }
-                        };
+    let mut first_image_data = Vec::new();
 
-                        // Check if the file has an image extension
-                        if let Some(extension) = Path::new(&filename_str)
-                            .extension()
-                            .and_then(OsStr::to_str)
-                            .map(|ext| ext.to_lowercase())
-                        {
-                            if image_extensions.contains(extension.as_str()) {
-                                debug!("Found image: {}", filename_str);
-                                images.push(filename_str.clone());
-
-                                // Remember the first image name for extraction
-                                if first_image_name.is_none() {
-                                    first_image_name = Some(filename_str);
-                                }
-                            }
-                        }
+    // Read through the archive header by header
+    let mut archive = Archive::new(path).open_for_processing().unwrap();
+    while let Some(header) = archive.read_header()? {
+        let filename_path = header.entry().filename.clone();
+        let filename_ext_opt = filename_path.extension();
+        match filename_ext_opt {
+            Some(os_str) => {
+                let filename_ext = os_str.to_ascii_lowercase();
+                archive = if image_extensions.contains(filename_ext.to_str().unwrap()) {
+                    let filename = filename_path.as_os_str().to_str().unwrap().to_string();
+                    images.push(filename.to_string());
+                    if first_image_data.is_empty() {
+                        info!("Extracting first image: {}", filename);
+                        let (data, rest) = header.read()?;
+                        first_image_data = data;
+                        rest
+                    } else {
+                        header.skip()?
                     }
-                    Err(err) => {
-                        warn!("Error reading RAR entry: {}", err);
-                        return Err(RarProcessingError::HeaderError(err));
-                    }
+                } else {
+                    header.skip()?
                 }
             }
-        }
-        Err(e) => {
-            // the error we passed in is always None
-            // if the archive could not be read at all
-            error!("Error opening archive: {}", e);
-            return Err(RarProcessingError::OpenError(e));
+            None => archive = header.skip()?,
         }
     }
 
@@ -324,208 +293,14 @@ fn process_rar_file(path: &Path) -> Result<(Vec<String>, Vec<u8>), RarProcessing
         return Err(RarProcessingError::NoImagesFound);
     }
 
-    // Extract data from the first image
-    let first_image = first_image_name.as_ref().unwrap().clone(); // Use as_ref() to avoid moving from the Option
-    info!("Extracting first image: {}", first_image);
-
-    // Open the archive for extraction
-    let mut image_data = Vec::new();
-    let mut extraction_error = None;
-
-    // Use a separate pass to find and extract the first image
-    // We'll use the same break_open approach that worked for listing
-    let mut possible_extract_error = None;
-    match Archive::new(path).break_open::<ListSplit>(Some(&mut possible_extract_error)) {
-        Ok(archive) => {
-            if let Some(error) = possible_extract_error {
-                warn!("Partial RAR error during extraction: {}, continuing", error);
-            }
-            for entry_result in archive {
-                match entry_result {
-                    Ok(entry) => {
-                        // Check if this is the file we want to extract
-                        if let Some(filename) = entry.filename.to_str() {
-                            if filename == first_image {
-                                // Found our target file, extract its data
-                                info!("Found target file for extraction: {}", filename);
-                                // Extract the file directly from this entry
-                                // We need to create a new archive to extract the data
-                                // We'll use an approach that works with the current unrar crate
-                                // For unrar 0.5.8, we need to manually extract the data by reading the file content
-                                info!("Attempting to read file data directly");
-
-                                // In unrar 0.5.8, we can't directly get file data from a ListSplit entry
-                                // We need to create a new extraction archive
-                                let mut success = false;
-
-                                // Create a temporary file for extraction
-                                let temp_dir = tempfile::tempdir()
-                                    .map_err(|e| {
-                                        let error_msg =
-                                            format!("Failed to create temp directory: {}", e);
-                                        error!("{}", &error_msg);
-                                        extraction_error = Some(error_msg);
-                                    })
-                                    .ok();
-                                if let Some(temp_dir) = temp_dir {
-                                    // Try using the command-line unrar tool if available
-                                    if let Some(cmd_path) = which::which("unrar").ok() {
-                                        info!("Attempting to extract using command-line unrar");
-
-                                        // Use command-line unrar to extract the file
-                                        match std::process::Command::new(&cmd_path)
-                                            .args(&[
-                                                "e",
-                                                "-o+",
-                                                "-idq",
-                                                path.to_str().unwrap_or(""),
-                                                &filename,
-                                                &format!(
-                                                    "-o{}",
-                                                    temp_dir.path().to_str().unwrap_or("")
-                                                ),
-                                            ])
-                                            .status()
-                                        {
-                                            Ok(status) if status.success() => {
-                                                // Extraction was successful, the file should be in the temp directory
-                                                // The filename may be different, so we need to find it
-                                                let extracted_file = match filename
-                                                    .rsplit('/')
-                                                    .next()
-                                                    .or_else(|| filename.rsplit('\\').next())
-                                                {
-                                                    Some(name) => name,
-                                                    None => &filename,
-                                                };
-
-                                                // Construct path to the extracted file
-                                                let extracted_path =
-                                                    temp_dir.path().join(extracted_file);
-
-                                                // Read the file data
-                                                match fs::read(&extracted_path) {
-                                                    Ok(data) => {
-                                                        info!("Successfully read {} bytes from extracted file", data.len());
-                                                        image_data = data;
-                                                        success = true;
-                                                    }
-                                                    Err(err) => {
-                                                        let error_msg = format!(
-                                                            "Failed to read extracted file: {}",
-                                                            err
-                                                        );
-                                                        error!("{}", &error_msg);
-                                                        extraction_error = Some(error_msg);
-                                                    }
-                                                }
-                                            }
-                                            Ok(_) => {
-                                                let error_msg =
-                                                    "Command-line unrar extraction failed"
-                                                        .to_string();
-                                                error!("{}", &error_msg);
-                                                extraction_error = Some(error_msg);
-                                            }
-                                            Err(err) => {
-                                                let error_msg = format!(
-                                                    "Failed to execute command-line unrar: {}",
-                                                    err
-                                                );
-                                                error!("{}", &error_msg);
-                                                extraction_error = Some(error_msg);
-                                            }
-                                        }
-                                    } else {
-                                        // Fallback: try an alternative method if unrar isn't available
-                                        let error_msg = "Command-line unrar not available, no fallback extraction method available".to_string();
-                                        error!("{}", &error_msg);
-                                        extraction_error = Some(error_msg);
-                                    }
-                                }
-
-                                // If we failed to extract the data, try to use a simpler approach
-                                if !success {
-                                    let error_msg =
-                                        "Failed to extract image using all available methods"
-                                            .to_string();
-                                    error!("{}", &error_msg);
-                                    extraction_error = Some(error_msg);
-                                }
-
-                                break; // Stop after processing the first image
-                            }
-                        }
-                    }
-                    Err(err) => {
-                        let error_msg = format!("Error processing entry: {}", err);
-                        error!("{}", &error_msg);
-                        extraction_error = Some(error_msg);
-                        break;
-                    }
-                }
-            }
-        }
-        Err(err) => {
-            let error_msg = format!("Failed to open archive for extraction: {}", err);
-            error!("{}", &error_msg);
-            return Err(RarProcessingError::OpenError(err));
-        }
-    }
-
-    // Check if there was an error during extraction
-    if let Some(error) = extraction_error {
-        return Err(RarProcessingError::ExtractionError(error));
-    }
-
     // Verify we got image data
-    if image_data.is_empty() {
-        // One last attempt if all other methods failed
-        if let Some(first_image) = &first_image_name {
-            error!("All extraction methods failed, trying one last approach");
-
-            // Try to use the external unrar command as a last resort
-            if let Some(unrar_cmd) = which::which("unrar").ok() {
-                let temp_dir = tempfile::tempdir().ok();
-
-                if let Some(temp_dir) = temp_dir {
-                    // Run unrar command with e (extract) option
-                    let status = std::process::Command::new(unrar_cmd)
-                        .arg("e") // extract
-                        .arg("-o+") // overwrite
-                        .arg("-idq") // quiet mode
-                        .arg(path) // archive path
-                        .arg(first_image) // file to extract
-                        .arg(format!("-o{}", temp_dir.path().to_str().unwrap_or(""))) // output dir
-                        .status();
-
-                    if let Ok(status) = status {
-                        if status.success() {
-                            // Find the extracted file
-                            let file_name = Path::new(first_image).file_name().unwrap_or_default();
-                            let extracted_path = temp_dir.path().join(file_name);
-
-                            if let Ok(data) = fs::read(&extracted_path) {
-                                image_data = data;
-                                info!(
-                                    "Last resort extraction successful: {} bytes",
-                                    image_data.len()
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // If still empty after last attempt, return error
-        if image_data.is_empty() {
-            return Err(RarProcessingError::ExtractionError(
-                "Failed to extract image data (empty result)".to_string(),
-            ));
-        }
+    if first_image_data.is_empty() {
+        return Err(RarProcessingError::ExtractionError(
+            "Failed to extract image data (empty result)".to_string(),
+        ));
     }
-    Ok((images, image_data))
+
+    Ok((images, first_image_data))
 }
 
 #[cfg(test)]
