@@ -93,10 +93,7 @@ impl fmt::Display for RarProcessingStatus {
 #[derive(Debug)]
 enum RarProcessingError {
     OpenError(UnrarError),
-    ListingError(UnrarError),
     HeaderError(UnrarError),
-    SkipError(UnrarError),
-    InvalidFileName,
     EncodingError,
     FileTooLarge(u64),
     NoImagesFound,
@@ -106,10 +103,7 @@ impl fmt::Display for RarProcessingError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             RarProcessingError::OpenError(e) => write!(f, "Failed to open RAR file: {}", e),
-            RarProcessingError::ListingError(e) => write!(f, "Failed to list RAR contents: {}", e),
             RarProcessingError::HeaderError(e) => write!(f, "Failed to read RAR header: {}", e),
-            RarProcessingError::SkipError(e) => write!(f, "Failed to skip to next file: {}", e),
-            RarProcessingError::InvalidFileName => write!(f, "Invalid or corrupted filename in RAR"),
             RarProcessingError::EncodingError => write!(f, "Failed to decode filename encoding"),
             RarProcessingError::FileTooLarge(size) => write!(f, "RAR file is too large ({} MB). Maximum allowed size is {} MB", 
                 size / (1024 * 1024), MAX_RAR_FILE_SIZE / (1024 * 1024)),
@@ -353,6 +347,47 @@ mod tests {
 
         for (status, expected) in statuses {
             assert_eq!(status.to_string(), expected);
+        }
+    }
+
+    #[test]
+    fn test_cbr_file_processing() {
+        // Test with a real CBR file (CBR is a valid subset of RAR)
+        // This file is approximately 93MB, which is below the MAX_RAR_FILE_SIZE (100MB)
+        let cbr_path = PathBuf::from("inputs/nintendo_power_069_feb_1995.cbr");
+        
+        // Make sure the test file exists
+        assert!(cbr_path.exists(), "Test file does not exist: {}", cbr_path.display());
+        
+        // Process the CBR file
+        let result = process_rar_file(&cbr_path);
+        
+        // Verify successful processing
+        match result {
+            Ok(image_files) => {
+                // Verify we received a non-empty vector of image files
+                assert!(!image_files.is_empty(), "Expected non-empty vector of image files");
+                
+                // Verify all returned paths have valid image extensions
+                let valid_extensions = ["jpg", "jpeg", "png", "gif", "bmp", "webp", "tiff", "tif"];
+                
+                for image_path in &image_files {
+                    let path = Path::new(image_path);
+                    let extension = path.extension()
+                        .and_then(|ext| ext.to_str())
+                        .map(|ext| ext.to_lowercase());
+                    
+                    assert!(
+                        extension.is_some() && valid_extensions.contains(&extension.unwrap().as_str()),
+                        "File has invalid image extension: {}", image_path
+                    );
+                }
+                
+                println!("Successfully processed CBR file with {} images", image_files.len());
+            },
+            Err(err) => {
+                panic!("Failed to process CBR file: {:?}", err);
+            }
         }
     }
 }
