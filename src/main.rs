@@ -24,6 +24,7 @@ fn main() {
         .add_systems(Update, status_update_system)
         .add_systems(Update, display_image_system)
         .add_systems(Update, keyboard_navigation_system)
+        .add_systems(Update, mouse_event_listen)
         .add_systems(Startup, setup)
         .insert_resource(RarImageState::default())
         .run();
@@ -52,6 +53,12 @@ struct StatusText;
 #[derive(Component)]
 struct DisplayImage;
 
+// Component to mark the image display entity
+#[derive(Component)]
+struct OverlayRect {
+    is_left: bool,
+}
+
 // System to update the status text based on RarImageState
 fn status_update_system(
     rar_state: Res<RarImageState>,
@@ -72,6 +79,54 @@ fn status_update_system(
                     .as_str();
                 }
             }
+        }
+    }
+}
+
+const BUFFER: f32 = 5.0;
+
+fn mouse_event_listen(
+    mut mouse_motion_events: EventReader<CursorMoved>,
+    mut overlay_rect_query: Query<(&OverlayRect, &mut Transform), Without<DisplayImage>>,
+    sprite_query: Query<&Sprite, With<DisplayImage>>,
+    sprite_transform_query: Query<&Transform, With<DisplayImage>>,
+    window_query: Query<&Window>,
+) {
+    let mut window_size = Vec2::new(0.0, 0.0);
+    let mut image_size = Vec2::new(0.0, 0.0);
+    let mut image_pos = Vec2::new(0.0, 0.0);
+    for sprite in &sprite_query {
+        match sprite.custom_size {
+            Some(size) => image_size = size,
+            None => {}
+        };
+    }
+    for transform in &sprite_transform_query {
+        image_pos = transform.translation.xy();
+    }
+    for window in &window_query {
+        window_size = Vec2::new(window.width(), window.height());
+    }
+    let image_left_edge = image_pos.x - (image_size.x * 0.5) + (window_size.x / 2.0);
+    let image_right_edge = image_pos.x + (image_size.x * 0.5) + (window_size.x / 2.0);
+    for ev in mouse_motion_events.read() {
+        let mouse_pos = ev.position;
+        for (rect, mut transform) in &mut overlay_rect_query {
+            let rect_width = if mouse_pos.x < image_right_edge && mouse_pos.x > image_left_edge {
+                (if rect.is_left {
+                    mouse_pos.x - image_left_edge
+                } else {
+                    image_right_edge - mouse_pos.x
+                }) - BUFFER
+            } else {
+                0.0
+            };
+            transform.scale.x = rect_width;
+            transform.translation.x = if rect.is_left {
+                (image_left_edge + (rect_width / 2.0)) - (window_size.x / 2.0)
+            } else {
+                (image_right_edge - (rect_width / 2.0)) - (window_size.x / 2.0)
+            };
         }
     }
 }
@@ -146,10 +201,10 @@ struct RarImageState {
     last_processed: f64, // Time when the last file was processed
     // Image display fields
     current_image_data: Option<Vec<u8>>, // Data for the currently displayed image
-    current_image_index: usize,         // Index of the currently displayed image
+    current_image_index: usize,          // Index of the currently displayed image
     texture_handle: Option<Handle<Image>>,
     image_loaded: bool,
-    needs_reload: bool,                 // Flag to indicate the image needs to be reloaded
+    needs_reload: bool, // Flag to indicate the image needs to be reloaded
 }
 
 impl Default for RarImageState {
@@ -309,13 +364,15 @@ fn process_rar_file(path: &Path) -> Result<(Vec<String>, Vec<u8>), RarProcessing
     Ok((images, first_image_data))
 }
 
-
 // System to display the first image from the RAR file
 fn display_image_system(
     mut commands: Commands,
     mut rar_state: ResMut<RarImageState>,
     mut images: ResMut<Assets<Image>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<ColorMaterial>>,
     image_query: Query<Entity, With<DisplayImage>>,
+    overlay_query: Query<Entity, With<OverlayRect>>,
 ) {
     // Check if we have image data available and it's not yet loaded
     if let Some(image_data) = &rar_state.current_image_data {
@@ -358,6 +415,9 @@ fn display_image_system(
                     for entity in image_query.iter() {
                         commands.entity(entity).despawn();
                     }
+                    for entity in overlay_query.iter() {
+                        commands.entity(entity).despawn();
+                    }
 
                     // Calculate a scale to fit the image nicely in the window
                     // This is a simple heuristic, could be improved based on window size
@@ -375,6 +435,21 @@ fn display_image_system(
                             ..default()
                         },
                         DisplayImage,
+                    ));
+
+                    // Add overlay rectangles
+                    let material = materials.add(Color::linear_rgba(0.0, 0.0, 0.0, 0.7));
+                    commands.spawn((
+                        Mesh2d(meshes.add(Rectangle::new(1.0, height as f32 * scale_factor))),
+                        MeshMaterial2d(material.clone()),
+                        Transform::from_xyz(-(width as f32 * scale_factor * 0.5), 0.0, 1.0),
+                        OverlayRect { is_left: true },
+                    ));
+                    commands.spawn((
+                        Mesh2d(meshes.add(Rectangle::new(1.0, height as f32 * scale_factor))),
+                        MeshMaterial2d(material.clone()),
+                        Transform::from_xyz(width as f32 * scale_factor * 0.5, 0.0, 1.0),
+                        OverlayRect { is_left: false },
                     ));
 
                     // Update state
@@ -435,7 +510,7 @@ fn keyboard_navigation_system(
     if changed && new_index != rar_state.current_image_index {
         info!("Navigating to image {}/{}", new_index + 1, image_count);
         rar_state.current_image_index = new_index;
-        
+
         // Load the new image data
         if let Some(path) = &rar_state.current_rar_path {
             match load_image_by_index(path, new_index, &rar_state.found_images) {
@@ -446,7 +521,10 @@ fn keyboard_navigation_system(
                 }
                 Err(e) => {
                     error!("Failed to load image {}: {}", new_index, e);
-                    rar_state.status = RarProcessingStatus::Error(format!("Failed to load image {}: {}", new_index, e));
+                    rar_state.status = RarProcessingStatus::Error(format!(
+                        "Failed to load image {}: {}",
+                        new_index, e
+                    ));
                 }
             }
         }
@@ -475,7 +553,12 @@ fn load_image_by_index(
     let mut image_data = Vec::new();
 
     while let Some(header) = archive.read_header()? {
-        let filename = header.entry().filename.as_os_str().to_str().unwrap_or_default();
+        let filename = header
+            .entry()
+            .filename
+            .as_os_str()
+            .to_str()
+            .unwrap_or_default();
 
         if filename == target_filename {
             let (data, _) = header.read()?;
