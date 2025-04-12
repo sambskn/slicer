@@ -1,3 +1,4 @@
+use bevy::input::mouse::MouseWheel;
 use bevy::prelude::Image;
 use bevy::{
     asset::{Handle, RenderAssetUsages},
@@ -16,6 +17,8 @@ use unrar::{error::UnrarError, Archive};
 // Constants
 const MAX_RAR_FILE_SIZE: u64 = 100 * 1024 * 1024; // 100 MB
 const PROCESSING_COOLDOWN: f64 = 1.0; // 1 second cooldown between processing files
+const MIN_BUFFER: f32 = 5.0;
+const MAX_BUFFER: f32 = 50.0;
 
 fn main() {
     App::new()
@@ -24,7 +27,8 @@ fn main() {
         .add_systems(Update, status_update_system)
         .add_systems(Update, display_image_system)
         .add_systems(Update, keyboard_navigation_system)
-        .add_systems(Update, mouse_event_listen)
+        .add_systems(Update, mouse_move_listen)
+        .add_systems(Update, mouse_scroll_listen)
         .add_systems(Startup, setup)
         .insert_resource(RarImageState::default())
         .run();
@@ -32,7 +36,7 @@ fn main() {
 
 fn setup(mut commands: Commands) {
     commands.spawn(Camera2d::default());
-
+    commands.insert_resource(HighlightBuffer(MIN_BUFFER));
     // Status text (will be updated by the status_update_system)
     commands.spawn((
         Text::new("Status: Idle"),
@@ -59,6 +63,9 @@ struct OverlayRect {
     is_left: bool,
 }
 
+#[derive(Resource)]
+struct HighlightBuffer(f32);
+
 // System to update the status text based on RarImageState
 fn status_update_system(
     rar_state: Res<RarImageState>,
@@ -83,11 +90,10 @@ fn status_update_system(
     }
 }
 
-const BUFFER: f32 = 5.0;
-
-fn mouse_event_listen(
+fn mouse_move_listen(
     mut mouse_motion_events: EventReader<CursorMoved>,
     mut overlay_rect_query: Query<(&OverlayRect, &mut Transform), Without<DisplayImage>>,
+    highlight_buffer: Res<HighlightBuffer>,
     sprite_query: Query<&Sprite, With<DisplayImage>>,
     sprite_transform_query: Query<&Transform, With<DisplayImage>>,
     window_query: Query<&Window>,
@@ -117,7 +123,7 @@ fn mouse_event_listen(
                     mouse_pos.x - image_left_edge
                 } else {
                     image_right_edge - mouse_pos.x
-                }) - BUFFER
+                }) - highlight_buffer.0
             } else {
                 0.0
             };
@@ -127,6 +133,24 @@ fn mouse_event_listen(
             } else {
                 (image_right_edge - (rect_width / 2.0)) - (window_size.x / 2.0)
             };
+        }
+    }
+}
+
+
+fn mouse_scroll_listen(
+    mut mouse_wheel_events: EventReader<MouseWheel>,
+    mut highlight_buffer: ResMut<HighlightBuffer>,
+) {
+    for event in mouse_wheel_events.read() {
+        match event.y {
+            0.0..=1.0 => {
+                highlight_buffer.0  = if highlight_buffer.0 == MAX_BUFFER { MAX_BUFFER } else { highlight_buffer.0 +1.0 };
+            },
+            -1.0..0.0 => {
+                highlight_buffer.0  = if highlight_buffer.0 == MIN_BUFFER { MIN_BUFFER } else { highlight_buffer.0 - 1.0 };
+            },
+            _ => {}
         }
     }
 }
