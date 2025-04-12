@@ -309,159 +309,6 @@ fn process_rar_file(path: &Path) -> Result<(Vec<String>, Vec<u8>), RarProcessing
     Ok((images, first_image_data))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::fs::File;
-    use std::io::Write;
-    use std::path::PathBuf;
-    use tempfile::tempdir;
-
-    #[test]
-    fn test_is_rar_file() {
-        // Test with valid RAR extensions
-        let valid_paths = vec![
-            PathBuf::from("test.rar"),
-            PathBuf::from("path/to/archive.RAR"),
-            PathBuf::from("/absolute/path/file.rar"),
-        ];
-
-        for path in valid_paths {
-            assert!(
-                is_rar_file(&path),
-                "Path {} should be recognized as a RAR file",
-                path.display()
-            );
-        }
-
-        // Test with invalid extensions
-        let invalid_paths = vec![
-            PathBuf::from("test.zip"),
-            PathBuf::from("test.txt"),
-            PathBuf::from("test"),
-            PathBuf::from("test.rar.txt"),
-        ];
-
-        for path in invalid_paths {
-            assert!(
-                !is_rar_file(&path),
-                "Path {} should not be recognized as a RAR file",
-                path.display()
-            );
-        }
-    }
-
-    #[test]
-    fn test_file_size_validation() {
-        // Create a temporary directory
-        let dir = tempdir().expect("Failed to create temp dir");
-
-        // Create a file larger than the maximum allowed size
-        let file_path = dir.path().join("large.rar");
-        let mut file = File::create(&file_path).expect("Failed to create test file");
-
-        // Write data to the file to make it large enough
-        let data = [0u8; 1024]; // 1KB chunk
-        let chunks_to_write = (MAX_RAR_FILE_SIZE as usize / 1024) + 1; // One more than the max
-
-        for _ in 0..chunks_to_write {
-            file.write_all(&data).expect("Failed to write to test file");
-        }
-
-        // Test the process_rar_file function with the large file
-        let result = process_rar_file(&file_path);
-
-        // Verify the result is an error of type FileTooLarge
-        match result {
-            Err(RarProcessingError::FileTooLarge(_)) => {
-                // This is the expected case
-                assert!(true);
-            }
-            _ => {
-                panic!("Expected FileTooLarge error but got: {:?}", result);
-            }
-        }
-    }
-
-    #[test]
-    fn test_rar_processing_status_display() {
-        // Test all status variants for correct string representation
-        let statuses = vec![
-            (RarProcessingStatus::Idle, "Idle"),
-            (RarProcessingStatus::Loading, "Loading..."),
-            (
-                RarProcessingStatus::Success,
-                "Successfully processed RAR file",
-            ),
-            (
-                RarProcessingStatus::Error("Test error".to_string()),
-                "Error: Test error",
-            ),
-        ];
-
-        for (status, expected) in statuses {
-            assert_eq!(status.to_string(), expected);
-        }
-    }
-
-    #[test]
-    fn test_cbr_file_processing() {
-        // Test with a real CBR file (CBR is a valid subset of RAR)
-        // This file is approximately 93MB, which is below the MAX_RAR_FILE_SIZE (100MB)
-        let cbr_path = PathBuf::from("inputs/nintendo_power_069_feb_1995.cbr");
-
-        // Make sure the test file exists
-        assert!(
-            cbr_path.exists(),
-            "Test file does not exist: {}",
-            cbr_path.display()
-        );
-
-        // Process the CBR file
-        let result = process_rar_file(&cbr_path);
-
-        // Verify successful processing
-        match result {
-            Ok((image_files, image_data)) => {
-                // Verify we received a non-empty vector of image files
-                assert!(
-                    !image_files.is_empty(),
-                    "Expected non-empty vector of image files"
-                );
-
-                // Verify all returned paths have valid image extensions
-                let valid_extensions = ["jpg", "jpeg", "png", "gif", "bmp", "webp", "tiff", "tif"];
-
-                for image_path in &image_files {
-                    let path = Path::new(image_path);
-                    let extension = path
-                        .extension()
-                        .and_then(|ext| ext.to_str())
-                        .map(|ext| ext.to_lowercase());
-
-                    assert!(
-                        extension.is_some()
-                            && valid_extensions.contains(&extension.unwrap().as_str()),
-                        "File has invalid image extension: {}",
-                        image_path
-                    );
-                }
-
-                // Verify we got image data
-                assert!(!image_data.is_empty(), "Expected non-empty image data");
-
-                println!(
-                    "Successfully processed CBR file with {} images and {} bytes of image data",
-                    image_files.len(),
-                    image_data.len()
-                );
-            }
-            Err(err) => {
-                panic!("Failed to process CBR file: {:?}", err);
-            }
-        }
-    }
-}
 
 // System to display the first image from the RAR file
 fn display_image_system(
@@ -647,4 +494,158 @@ fn load_image_by_index(
     }
 
     Ok(image_data)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs::File;
+    use std::io::Write;
+    use std::path::PathBuf;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_is_rar_file() {
+        // Test with valid RAR extensions
+        let valid_paths = vec![
+            PathBuf::from("test.rar"),
+            PathBuf::from("path/to/archive.RAR"),
+            PathBuf::from("/absolute/path/file.rar"),
+        ];
+
+        for path in valid_paths {
+            assert!(
+                is_rar_file(&path),
+                "Path {} should be recognized as a RAR file",
+                path.display()
+            );
+        }
+
+        // Test with invalid extensions
+        let invalid_paths = vec![
+            PathBuf::from("test.zip"),
+            PathBuf::from("test.txt"),
+            PathBuf::from("test"),
+            PathBuf::from("test.rar.txt"),
+        ];
+
+        for path in invalid_paths {
+            assert!(
+                !is_rar_file(&path),
+                "Path {} should not be recognized as a RAR file",
+                path.display()
+            );
+        }
+    }
+
+    #[test]
+    fn test_file_size_validation() {
+        // Create a temporary directory
+        let dir = tempdir().expect("Failed to create temp dir");
+
+        // Create a file larger than the maximum allowed size
+        let file_path = dir.path().join("large.rar");
+        let mut file = File::create(&file_path).expect("Failed to create test file");
+
+        // Write data to the file to make it large enough
+        let data = [0u8; 1024]; // 1KB chunk
+        let chunks_to_write = (MAX_RAR_FILE_SIZE as usize / 1024) + 1; // One more than the max
+
+        for _ in 0..chunks_to_write {
+            file.write_all(&data).expect("Failed to write to test file");
+        }
+
+        // Test the process_rar_file function with the large file
+        let result = process_rar_file(&file_path);
+
+        // Verify the result is an error of type FileTooLarge
+        match result {
+            Err(RarProcessingError::FileTooLarge(_)) => {
+                // This is the expected case
+                assert!(true);
+            }
+            _ => {
+                panic!("Expected FileTooLarge error but got: {:?}", result);
+            }
+        }
+    }
+
+    #[test]
+    fn test_rar_processing_status_display() {
+        // Test all status variants for correct string representation
+        let statuses = vec![
+            (RarProcessingStatus::Idle, "Idle"),
+            (RarProcessingStatus::Loading, "Loading..."),
+            (
+                RarProcessingStatus::Success,
+                "Successfully processed RAR file",
+            ),
+            (
+                RarProcessingStatus::Error("Test error".to_string()),
+                "Error: Test error",
+            ),
+        ];
+
+        for (status, expected) in statuses {
+            assert_eq!(status.to_string(), expected);
+        }
+    }
+
+    #[test]
+    fn test_cbr_file_processing() {
+        // Test with a real CBR file (CBR is a valid subset of RAR)
+        // This file is approximately 93MB, which is below the MAX_RAR_FILE_SIZE (100MB)
+        let cbr_path = PathBuf::from("inputs/nintendo_power_069_feb_1995.cbr");
+
+        // Make sure the test file exists
+        assert!(
+            cbr_path.exists(),
+            "Test file does not exist: {}",
+            cbr_path.display()
+        );
+
+        // Process the CBR file
+        let result = process_rar_file(&cbr_path);
+
+        // Verify successful processing
+        match result {
+            Ok((image_files, image_data)) => {
+                // Verify we received a non-empty vector of image files
+                assert!(
+                    !image_files.is_empty(),
+                    "Expected non-empty vector of image files"
+                );
+
+                // Verify all returned paths have valid image extensions
+                let valid_extensions = ["jpg", "jpeg", "png", "gif", "bmp", "webp", "tiff", "tif"];
+
+                for image_path in &image_files {
+                    let path = Path::new(image_path);
+                    let extension = path
+                        .extension()
+                        .and_then(|ext| ext.to_str())
+                        .map(|ext| ext.to_lowercase());
+
+                    assert!(
+                        extension.is_some()
+                            && valid_extensions.contains(&extension.unwrap().as_str()),
+                        "File has invalid image extension: {}",
+                        image_path
+                    );
+                }
+
+                // Verify we got image data
+                assert!(!image_data.is_empty(), "Expected non-empty image data");
+
+                println!(
+                    "Successfully processed CBR file with {} images and {} bytes of image data",
+                    image_files.len(),
+                    image_data.len()
+                );
+            }
+            Err(err) => {
+                panic!("Failed to process CBR file: {:?}", err);
+            }
+        }
+    }
 }
