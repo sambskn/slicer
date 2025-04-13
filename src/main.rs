@@ -28,10 +28,13 @@ fn main() {
         .add_systems(Update, status_update_system)
         .add_systems(Update, display_image_system)
         .add_systems(Update, keyboard_navigation_system)
+        .add_systems(Update, update_overlay_rects)
+        .add_systems(Update, update_size_info)
         .add_systems(Update, mouse_move_listen)
         .add_systems(Update, mouse_scroll_listen)
         .add_systems(Update, mouse_click_listen)
         .add_systems(Startup, setup)
+        .add_systems(Update, update_slice_location)
         .insert_resource(RarImageState::default())
         .run();
 }
@@ -39,6 +42,9 @@ fn main() {
 fn setup(mut commands: Commands) {
     commands.spawn(Camera2d::default());
     commands.insert_resource(HighlightBuffer(MIN_BUFFER));
+    commands.insert_resource(LastMouseLoc(Vec2 { x: 0.0, y: 0.0 }));
+    commands.insert_resource(WindowAndImageInfo::default());
+    commands.insert_resource(SliceIndex(0));
     // Status text (will be updated by the status_update_system)
     commands.spawn((
         Text::new("Status: Idle"),
@@ -65,8 +71,37 @@ struct OverlayRect {
     is_left: bool,
 }
 
+// Slice component
+#[derive(Component)]
+struct ImageSlice(usize);
+
 #[derive(Resource)]
 struct HighlightBuffer(f32);
+
+#[derive(Resource)]
+struct LastMouseLoc(Vec2);
+
+#[derive(Resource)]
+struct SliceIndex(usize);
+
+#[derive(Resource)]
+struct WindowAndImageInfo {
+    unscaled_image_size: Vec2,
+    image_size: Vec2,
+    image_loc: Vec2,
+    window_size: Vec2,
+}
+
+impl WindowAndImageInfo {
+    fn default() -> Self {
+        WindowAndImageInfo {
+            unscaled_image_size: Vec2 { x: 0.0, y: 0.0 },
+            image_size: Vec2 { x: 0.0, y: 0.0 },
+            image_loc: Vec2 { x: 0.0, y: 0.0 },
+            window_size: Vec2 { x: 0.0, y: 0.0 },
+        }
+    }
+}
 
 // System to update the status text based on RarImageState
 fn status_update_system(
@@ -94,48 +129,63 @@ fn status_update_system(
 
 fn mouse_move_listen(
     mut mouse_motion_events: EventReader<CursorMoved>,
-    mut overlay_rect_query: Query<(&OverlayRect, &mut Transform), Without<DisplayImage>>,
-    highlight_buffer: Res<HighlightBuffer>,
+    mut new_mouse_loc: ResMut<LastMouseLoc>,
+) {
+    for ev in mouse_motion_events.read() {
+        new_mouse_loc.0 = ev.position;
+    }
+}
+
+fn update_size_info(
     sprite_query: Query<&Sprite, With<DisplayImage>>,
     sprite_transform_query: Query<&Transform, With<DisplayImage>>,
     window_query: Query<&Window>,
+    mut window_and_image_info: ResMut<WindowAndImageInfo>,
 ) {
-    let mut window_size = Vec2::new(0.0, 0.0);
-    let mut image_size = Vec2::new(0.0, 0.0);
-    let mut image_pos = Vec2::new(0.0, 0.0);
     for sprite in &sprite_query {
         match sprite.custom_size {
-            Some(size) => image_size = size,
+            Some(size) => window_and_image_info.image_size = size,
             None => {}
         };
     }
     for transform in &sprite_transform_query {
-        image_pos = transform.translation.xy();
+        window_and_image_info.image_loc = transform.translation.xy();
     }
     for window in &window_query {
-        window_size = Vec2::new(window.width(), window.height());
+        window_and_image_info.window_size = Vec2::new(window.width(), window.height());
     }
-    let image_left_edge = image_pos.x - (image_size.x * 0.5) + (window_size.x / 2.0);
-    let image_right_edge = image_pos.x + (image_size.x * 0.5) + (window_size.x / 2.0);
-    for ev in mouse_motion_events.read() {
-        let mouse_pos = ev.position;
-        for (rect, mut transform) in &mut overlay_rect_query {
-            let rect_width = if mouse_pos.x < image_right_edge && mouse_pos.x > image_left_edge {
-                (if rect.is_left {
-                    mouse_pos.x - image_left_edge
-                } else {
-                    image_right_edge - mouse_pos.x
-                }) - highlight_buffer.0
+}
+
+fn update_overlay_rects(
+    last_mouse_loc: Res<LastMouseLoc>,
+    mut overlay_rect_query: Query<(&OverlayRect, &mut Transform), Without<DisplayImage>>,
+    highlight_buffer: Res<HighlightBuffer>,
+    window_and_image_info: Res<WindowAndImageInfo>,
+) {
+    let image_left_edge = window_and_image_info.image_loc.x
+        - (window_and_image_info.image_size.x * 0.5)
+        + (window_and_image_info.window_size.x / 2.0);
+    let image_right_edge = window_and_image_info.image_loc.x
+        + (window_and_image_info.image_size.x * 0.5)
+        + (window_and_image_info.window_size.x / 2.0);
+
+    let mouse_pos = last_mouse_loc.0;
+    for (rect, mut transform) in &mut overlay_rect_query {
+        let rect_width = if mouse_pos.x < image_right_edge && mouse_pos.x > image_left_edge {
+            (if rect.is_left {
+                mouse_pos.x - image_left_edge
             } else {
-                0.0
-            };
-            transform.scale.x = rect_width;
-            transform.translation.x = if rect.is_left {
-                (image_left_edge + (rect_width / 2.0)) - (window_size.x / 2.0)
-            } else {
-                (image_right_edge - (rect_width / 2.0)) - (window_size.x / 2.0)
-            };
-        }
+                image_right_edge - mouse_pos.x
+            }) - highlight_buffer.0
+        } else {
+            0.0
+        };
+        transform.scale.x = rect_width;
+        transform.translation.x = if rect.is_left {
+            (image_left_edge + (rect_width / 2.0)) - (window_and_image_info.window_size.x / 2.0)
+        } else {
+            (image_right_edge - (rect_width / 2.0)) - (window_and_image_info.window_size.x / 2.0)
+        };
     }
 }
 
@@ -164,10 +214,103 @@ fn mouse_scroll_listen(
     }
 }
 
-fn mouse_click_listen(mut mouse_button_input_events: EventReader<MouseButtonInput>) {
+fn mouse_click_listen(
+    mut mouse_button_input_events: EventReader<MouseButtonInput>,
+    mut commands: Commands,
+    mut images: ResMut<Assets<Image>>,
+    camera_query: Query<(&Camera, &GlobalTransform)>,
+    window_and_image_info: Res<WindowAndImageInfo>,
+    last_mouse_loc: Res<LastMouseLoc>,
+    rar_state: Res<RarImageState>,
+    buffer: Res<HighlightBuffer>,
+    mut slice_idx: ResMut<SliceIndex>,
+) {
     for event in mouse_button_input_events.read() {
         if event.button == MouseButton::Left && event.state == ButtonState::Released {
-            info!("click up");
+            let mut image_x_highlight_edge = 0;
+            for (camera, transform) in &camera_query {
+                let mouse_transform_coords = camera
+                    .viewport_to_world_2d(transform, last_mouse_loc.0)
+                    .unwrap();
+                let scaled_highlight_left_edge_x = mouse_transform_coords.x
+                    + (window_and_image_info.image_size.x / 2.0)
+                    - (buffer.0 / 2.0);
+                image_x_highlight_edge = scaled_highlight_left_edge_x as u32;
+            }
+
+            let current_image_data = rar_state.current_image_data.clone();
+            match current_image_data {
+                Some(image_u8_vec) => {
+                    let image = image::load_from_memory(&image_u8_vec).unwrap();
+                    let y = 0;
+                    let slice_width = buffer.0 as u32;
+                    let slice_height = window_and_image_info.image_size.y as u32;
+                    let dyn_image =
+                        image.crop_imm(image_x_highlight_edge, y, slice_width, slice_height);
+
+                    let size = Extent3d {
+                        width: slice_width,
+                        height: slice_height,
+                        depth_or_array_layers: 1,
+                    };
+
+                    let texture = Image::new_fill(
+                        size,
+                        TextureDimension::D2,
+                        &dyn_image.to_rgba8(),
+                        TextureFormat::Rgba8Unorm,
+                        RenderAssetUsages::RENDER_WORLD,
+                    );
+
+                    // Store the texture handle
+                    let texture_handle = images.add(texture);
+                    let idx = slice_idx.0;
+                    slice_idx.0 += 1;
+                    commands.spawn((
+                        Sprite {
+                            image: texture_handle,
+                            custom_size: Some(Vec2::new(
+                                slice_width as f32 * 0.5,
+                                slice_height as f32 * 0.5,
+                            )),
+                            ..default()
+                        },
+                        Transform::from_xyz(
+                            (window_and_image_info.window_size.x / 2.0)
+                                + (slice_idx.0 as f32) * slice_width as f32,
+                            10.0,
+                            0.0,
+                        )
+                        .with_scale(Vec3::new(0.5, 0.5, 0.0)),
+                        ImageSlice(idx),
+                    ));
+                }
+
+                None => {
+                    println!("no image data found smh");
+                }
+            }
+        }
+    }
+}
+
+fn update_slice_location(
+    mut slice_query: Query<(&mut Transform, &ImageSlice)>,
+    buffer: Res<HighlightBuffer>,
+    time: Res<Time>,
+    window_and_image_info: Res<WindowAndImageInfo>,
+) {
+    for (mut transform, image_slice) in &mut slice_query {
+        let target = Vec3::new(
+            (10.0 + (image_slice.0 as f32 * buffer.0 * 0.5))
+                - (window_and_image_info.window_size.x / 2.0),
+            10.0 + (window_and_image_info.image_size.y * transform.scale.y)
+                - (window_and_image_info.window_size.y / 2.0),
+            image_slice.0 as f32,
+        );
+        let diff = target - transform.translation;
+        if diff.length() > 0.0001 {
+            transform.translation += diff * time.delta_secs() * 5.0;
         }
     }
 }
@@ -412,6 +555,7 @@ fn display_image_system(
     mut images: ResMut<Assets<Image>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
+    mut window_and_image_info: ResMut<WindowAndImageInfo>,
     image_query: Query<Entity, With<DisplayImage>>,
     overlay_query: Query<Entity, With<OverlayRect>>,
 ) {
@@ -430,7 +574,8 @@ fn display_image_system(
                     let rgba_img = img.to_rgba8();
                     let width = rgba_img.width();
                     let height = rgba_img.height();
-
+                    window_and_image_info.unscaled_image_size =
+                        Vec2::new(width as f32, height as f32);
                     info!("Successfully loaded image: {}x{}", width, height);
 
                     // Create a Bevy Image from the raw bytes
