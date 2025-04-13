@@ -20,6 +20,7 @@ const MAX_RAR_FILE_SIZE: u64 = 100 * 1024 * 1024; // 100 MB
 const PROCESSING_COOLDOWN: f64 = 1.0; // 1 second cooldown between processing files
 const MIN_BUFFER: f32 = 5.0;
 const MAX_BUFFER: f32 = 50.0;
+const LEFT_PADDING: f32 = 100.0;
 
 fn main() {
     App::new()
@@ -35,17 +36,23 @@ fn main() {
         .add_systems(Update, mouse_click_listen)
         .add_systems(Startup, setup)
         .add_systems(Update, update_slice_location)
-        .add_systems(Update, delete_on_esc)
+        .add_systems(Update, listen_for_key_commands)
+        .add_systems(Update, handle_slice_edit_commands)
+        .add_systems(Update, update_info_hidden_status)
+        .add_event::<SliceEditCommand>()
         .insert_resource(RarImageState::default())
+        .insert_resource(HighlightBuffer(MIN_BUFFER))
+        .insert_resource(LastMouseLoc(Vec2 { x: 0.0, y: 0.0 }))
+        .insert_resource(WindowAndImageInfo::default())
+        .insert_resource(SliceMarker(0, LEFT_PADDING))
+        .insert_resource(SliceScale(0.5))
+        .insert_resource(ActiveModifier(None))
+        .insert_resource(ToggleSettings::default())
         .run();
 }
 
 fn setup(mut commands: Commands) {
     commands.spawn(Camera2d::default());
-    commands.insert_resource(HighlightBuffer(MIN_BUFFER));
-    commands.insert_resource(LastMouseLoc(Vec2 { x: 0.0, y: 0.0 }));
-    commands.insert_resource(WindowAndImageInfo::default());
-    commands.insert_resource(SliceIndex(0));
     // Status text (will be updated by the status_update_system)
     commands.spawn((
         Text::new("Status: Idle"),
@@ -77,13 +84,15 @@ struct OverlayRect {
 struct ImageSlice {
     idx: usize,
     offset: Vec2,
+    slice_width: u32,
 }
 
 impl ImageSlice {
-    fn new(idx: usize) -> Self {
+    fn new(idx: usize, slice_width: u32) -> Self {
         ImageSlice {
             idx,
             offset: Vec2 { x: 0.0, y: 0.0 },
+            slice_width,
         }
     }
 
@@ -91,6 +100,7 @@ impl ImageSlice {
         ImageSlice {
             idx: self.idx,
             offset,
+            slice_width: self.slice_width,
         }
     }
 }
@@ -102,7 +112,28 @@ struct HighlightBuffer(f32);
 struct LastMouseLoc(Vec2);
 
 #[derive(Resource)]
-struct SliceIndex(usize);
+struct SliceMarker(usize, f32);
+
+impl SliceMarker {
+    fn reset(&mut self) {
+        self.0 = 0;
+        self.1 = LEFT_PADDING;
+    }
+}
+
+#[derive(Resource)]
+struct SliceScale(f32);
+
+#[derive(Resource)]
+struct ToggleSettings {
+    show_info: bool,
+}
+
+impl ToggleSettings {
+    fn default() -> Self {
+        ToggleSettings { show_info: false }
+    }
+}
 
 #[derive(Resource)]
 struct WindowAndImageInfo {
@@ -110,6 +141,20 @@ struct WindowAndImageInfo {
     image_size: Vec2,
     image_loc: Vec2,
     window_size: Vec2,
+}
+
+#[derive(Resource)]
+struct ActiveModifier(Option<Modifier>);
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Modifier {
+    AdjustDestinationScale,
+}
+
+#[derive(Event)]
+enum SliceEditCommand {
+    AlignAll,
+    RemoveAll,
 }
 
 impl WindowAndImageInfo {
@@ -214,22 +259,37 @@ fn update_overlay_rects(
 fn mouse_scroll_listen(
     mut mouse_wheel_events: EventReader<MouseWheel>,
     mut highlight_buffer: ResMut<HighlightBuffer>,
+    mut slice_scale: ResMut<SliceScale>,
+    active_modifier: Res<ActiveModifier>,
 ) {
+    let modify_buffer = if active_modifier.0.is_some() {
+        !(active_modifier.0.unwrap() == Modifier::AdjustDestinationScale)
+    } else {
+        true
+    };
     for event in mouse_wheel_events.read() {
         match event.y {
             0.0..=1.0 => {
-                highlight_buffer.0 = if highlight_buffer.0 == MAX_BUFFER {
-                    MAX_BUFFER
+                if modify_buffer {
+                    highlight_buffer.0 = if highlight_buffer.0 == MAX_BUFFER {
+                        MAX_BUFFER
+                    } else {
+                        highlight_buffer.0 + 1.0
+                    };
                 } else {
-                    highlight_buffer.0 + 1.0
-                };
+                    slice_scale.0 *= 1.125;
+                }
             }
             -1.0..0.0 => {
-                highlight_buffer.0 = if highlight_buffer.0 == MIN_BUFFER {
-                    MIN_BUFFER
+                if modify_buffer {
+                    highlight_buffer.0 = if highlight_buffer.0 == MIN_BUFFER {
+                        MIN_BUFFER
+                    } else {
+                        highlight_buffer.0 - 1.0
+                    };
                 } else {
-                    highlight_buffer.0 - 1.0
-                };
+                    slice_scale.0 *= 0.875;
+                }
             }
             _ => {}
         }
@@ -245,7 +305,7 @@ fn mouse_click_listen(
     last_mouse_loc: Res<LastMouseLoc>,
     rar_state: Res<RarImageState>,
     buffer: Res<HighlightBuffer>,
-    mut slice_idx: ResMut<SliceIndex>,
+    mut slice_marker: ResMut<SliceMarker>,
 ) {
     for event in mouse_button_input_events.read() {
         let image_left_edge = window_and_image_info.left_edge();
@@ -291,8 +351,8 @@ fn mouse_click_listen(
 
                     // Store the texture handle
                     let texture_handle = images.add(texture);
-                    let idx = slice_idx.0;
-                    slice_idx.0 += 1;
+                    let idx = slice_marker.0;
+                    slice_marker.0 += 1;
                     // Spawn new slice
                     commands.spawn((
                         Sprite {
@@ -300,17 +360,17 @@ fn mouse_click_listen(
                             ..default()
                         },
                         Transform::from_xyz(
-                            (window_and_image_info.window_size.x / 2.0)
-                                + (slice_idx.0 as f32) * slice_width as f32,
-                            10.0,
-                            0.0,
+                            // doesn't matter, will get moved as soon as it spawns
+                            0.0, 0.0, 0.0,
                         )
-                        .with_scale(Vec3::new(0.5, 0.5, 0.5)),
-                        ImageSlice::new(idx).with_offset(Vec2 {
-                            x: buffer.0,
+                        .with_scale(Vec3::new(0.5, 0.5, 0.0)),
+                        ImageSlice::new(idx, slice_width).with_offset(Vec2 {
+                            x: slice_marker.1 - LEFT_PADDING,
                             y: -last_mouse_loc.0.y,
                         }),
                     ));
+                    // iterate slcie marker width
+                    slice_marker.1 += slice_width as f32;
                 }
 
                 None => {
@@ -321,23 +381,31 @@ fn mouse_click_listen(
     }
 }
 
+const MOUSE_MOVE_SCALE: f32 = 0.5;
+const SLICE_Z_OFFSET: f32 = 10.0;
+
 fn update_slice_location(
     mut slice_query: Query<(&mut Transform, &ImageSlice)>,
-    buffer: Res<HighlightBuffer>,
+    slice_scale: Res<SliceScale>,
     time: Res<Time>,
-    window_and_image_info: Res<WindowAndImageInfo>,
     last_mouse_loc: Res<LastMouseLoc>,
 ) {
     for (mut transform, image_slice) in &mut slice_query {
-        let target = Vec3::new(
-            (10.0 + (image_slice.idx as f32 * buffer.0))
-                - (window_and_image_info.window_size.x / 2.0),
-            last_mouse_loc.0.y,
-            image_slice.idx as f32,
-        ) + Vec3::new(image_slice.offset.x, image_slice.offset.y, 0.0);
-        let diff = target - transform.translation;
-        if diff.length() > 0.0001 {
-            transform.translation += diff * time.delta_secs() * 5.0;
+        // modify translation
+        let target_translation = Vec3::new(
+            -last_mouse_loc.0.x * MOUSE_MOVE_SCALE,
+            last_mouse_loc.0.y * MOUSE_MOVE_SCALE,
+            image_slice.idx as f32 + SLICE_Z_OFFSET,
+        ) + (Vec3::new(image_slice.offset.x, image_slice.offset.y, 0.0)
+            * slice_scale.0);
+        let translation_diff = target_translation - transform.translation;
+        if translation_diff.length() > 0.0001 {
+            transform.translation += translation_diff * time.delta_secs() * 5.0;
+        }
+        let target_scale = Vec3::new(slice_scale.0, slice_scale.0, 0.0);
+        let scale_diff = target_scale - transform.scale;
+        if scale_diff.length() > 0.0001 {
+            transform.scale += scale_diff * time.delta_secs() * 5.0;
         }
     }
 }
@@ -744,17 +812,68 @@ fn keyboard_navigation_system(
     }
 }
 
-fn delete_on_esc(
+fn listen_for_key_commands(
     keyboard_input: Res<ButtonInput<KeyCode>>,
-    mut commands: Commands,
-    slice_query: Query<Entity, With<ImageSlice>>,
-    mut slice_idx: ResMut<SliceIndex>,
+    mut edit_command_writer: EventWriter<SliceEditCommand>,
+    mut active_modifier: ResMut<ActiveModifier>,
+    mut toggle_settings: ResMut<ToggleSettings>,
 ) {
     if keyboard_input.just_pressed(KeyCode::Escape) {
-        for slice in &slice_query {
-            commands.entity(slice).despawn();
+        edit_command_writer.send(SliceEditCommand::RemoveAll);
+    } else if keyboard_input.just_pressed(KeyCode::KeyA) {
+        edit_command_writer.send(SliceEditCommand::AlignAll);
+    } else if keyboard_input.just_pressed(KeyCode::KeyI) {
+        toggle_settings.show_info = !toggle_settings.show_info;
+    }
+    let current_mod = active_modifier.0;
+    if keyboard_input.pressed(KeyCode::KeyZ) && current_mod.is_none() {
+        active_modifier.0 = Some(Modifier::AdjustDestinationScale);
+    } else if !keyboard_input.pressed(KeyCode::KeyZ)
+        && current_mod.is_some()
+        && current_mod.unwrap() == Modifier::AdjustDestinationScale
+    {
+        active_modifier.0 = None;
+    }
+}
+
+fn handle_slice_edit_commands(
+    mut edit_command_reader: EventReader<SliceEditCommand>,
+    mut commands: Commands,
+    mut slice_query: Query<&mut ImageSlice>,
+    slice_ent_query: Query<Entity, With<ImageSlice>>,
+    mut slice_marker: ResMut<SliceMarker>,
+    window_and_image_info: Res<WindowAndImageInfo>,
+) {
+    for edit_command in edit_command_reader.read() {
+        match edit_command {
+            SliceEditCommand::RemoveAll => {
+                for slice in &slice_ent_query {
+                    commands.entity(slice).despawn();
+                }
+                slice_marker.reset();
+            }
+            SliceEditCommand::AlignAll => {
+                for mut slice in &mut slice_query {
+                    slice.offset.y = window_and_image_info.window_size.y * -0.5;
+                }
+            }
         }
-        slice_idx.0 = 0;
+    }
+}
+
+const HIDDEN_INFO_TEXT_COLOR: Color = Color::linear_rgba(0.0, 0.0, 0.0, 0.0);
+const VISIBLE_INFO_TEXT_COLOR: Color = Color::linear_rgba(1.0, 1.0, 1.0, 0.7);
+
+fn update_info_hidden_status(
+    toggle_settings: Res<ToggleSettings>,
+    mut info_text_color_query: Query<&mut TextColor, With<StatusText>>,
+) {
+    for mut text_color in &mut info_text_color_query {
+        if toggle_settings.show_info && text_color.0 != VISIBLE_INFO_TEXT_COLOR {
+            text_color.0 = VISIBLE_INFO_TEXT_COLOR;
+        } else if !toggle_settings.show_info && text_color.0 != HIDDEN_INFO_TEXT_COLOR {
+            text_color.0 = HIDDEN_INFO_TEXT_COLOR;
+        }
     }
 }
 
