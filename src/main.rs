@@ -74,7 +74,26 @@ struct OverlayRect {
 
 // Slice component
 #[derive(Component)]
-struct ImageSlice(usize);
+struct ImageSlice {
+    idx: usize,
+    offset: Vec2,
+}
+
+impl ImageSlice {
+    fn new(idx: usize) -> Self {
+        ImageSlice {
+            idx,
+            offset: Vec2 { x: 0.0, y: 0.0 },
+        }
+    }
+
+    fn with_offset(self: &Self, offset: Vec2) -> Self {
+        ImageSlice {
+            idx: self.idx,
+            offset,
+        }
+    }
+}
 
 #[derive(Resource)]
 struct HighlightBuffer(f32);
@@ -287,7 +306,10 @@ fn mouse_click_listen(
                             0.0,
                         )
                         .with_scale(Vec3::new(0.5, 0.5, 0.5)),
-                        ImageSlice(idx),
+                        ImageSlice::new(idx).with_offset(Vec2 {
+                            x: buffer.0,
+                            y: -last_mouse_loc.0.y,
+                        }),
                     ));
                 }
 
@@ -308,11 +330,11 @@ fn update_slice_location(
 ) {
     for (mut transform, image_slice) in &mut slice_query {
         let target = Vec3::new(
-            (10.0 + (image_slice.0 as f32 * buffer.0))
+            (10.0 + (image_slice.idx as f32 * buffer.0))
                 - (window_and_image_info.window_size.x / 2.0),
-            (last_mouse_loc.0.y) - window_and_image_info.window_size.y / 2.0,
-            image_slice.0 as f32,
-        );
+            last_mouse_loc.0.y,
+            image_slice.idx as f32,
+        ) + Vec3::new(image_slice.offset.x, image_slice.offset.y, 0.0);
         let diff = target - transform.translation;
         if diff.length() > 0.0001 {
             transform.translation += diff * time.delta_secs() * 5.0;
