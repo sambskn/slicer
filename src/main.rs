@@ -35,6 +35,7 @@ fn main() {
         .add_systems(Update, mouse_click_listen)
         .add_systems(Startup, setup)
         .add_systems(Update, update_slice_location)
+        .add_systems(Update, delete_on_esc)
         .insert_resource(RarImageState::default())
         .run();
 }
@@ -718,6 +719,20 @@ fn keyboard_navigation_system(
                 }
             }
         }
+    }
+}
+
+fn delete_on_esc(
+    keyboard_input: Res<ButtonInput<KeyCode>>,
+    mut commands: Commands,
+    slice_query: Query<Entity, With<ImageSlice>>,
+    mut slice_idx: ResMut<SliceIndex>,
+) {
+    if keyboard_input.just_pressed(KeyCode::Escape) {
+        for slice in &slice_query {
+            commands.entity(slice).despawn();
+        }
+        slice_idx.0 = 0;
     }
 }
 
