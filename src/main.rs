@@ -101,6 +101,12 @@ impl WindowAndImageInfo {
             window_size: Vec2 { x: 0.0, y: 0.0 },
         }
     }
+    fn left_edge(&self) -> f32 {
+        self.image_loc.x - (self.image_size.x * 0.5) + (self.window_size.x / 2.0)
+    }
+    fn right_edge(&self) -> f32 {
+        self.image_loc.x + (self.image_size.x * 0.5) + (self.window_size.x / 2.0)
+    }
 }
 
 // System to update the status text based on RarImageState
@@ -162,12 +168,8 @@ fn update_overlay_rects(
     highlight_buffer: Res<HighlightBuffer>,
     window_and_image_info: Res<WindowAndImageInfo>,
 ) {
-    let image_left_edge = window_and_image_info.image_loc.x
-        - (window_and_image_info.image_size.x * 0.5)
-        + (window_and_image_info.window_size.x / 2.0);
-    let image_right_edge = window_and_image_info.image_loc.x
-        + (window_and_image_info.image_size.x * 0.5)
-        + (window_and_image_info.window_size.x / 2.0);
+    let image_left_edge = window_and_image_info.left_edge();
+    let image_right_edge = window_and_image_info.right_edge();
 
     let mouse_pos = last_mouse_loc.0;
     for (rect, mut transform) in &mut overlay_rect_query {
@@ -226,28 +228,33 @@ fn mouse_click_listen(
     mut slice_idx: ResMut<SliceIndex>,
 ) {
     for event in mouse_button_input_events.read() {
-        if event.button == MouseButton::Left && event.state == ButtonState::Released {
-            let mut image_x_highlight_edge = 0;
+        let image_left_edge = window_and_image_info.left_edge();
+        let image_right_edge = window_and_image_info.right_edge();
+        if event.button == MouseButton::Left
+            && event.state == ButtonState::Released
+            && last_mouse_loc.0.x < image_right_edge
+            && last_mouse_loc.0.x > image_left_edge
+        {
+            let mut image_x_highlight_edge = 0.0;
             for (camera, transform) in &camera_query {
                 let mouse_transform_coords = camera
                     .viewport_to_world_2d(transform, last_mouse_loc.0)
                     .unwrap();
-                let scaled_highlight_left_edge_x = mouse_transform_coords.x
-                    + (window_and_image_info.image_size.x / 2.0)
-                    - (buffer.0 / 2.0);
-                image_x_highlight_edge = scaled_highlight_left_edge_x as u32;
+                image_x_highlight_edge = mouse_transform_coords.x;
             }
 
             let current_image_data = rar_state.current_image_data.clone();
             match current_image_data {
                 Some(image_u8_vec) => {
                     let image = image::load_from_memory(&image_u8_vec).unwrap();
+                    let x_mult = image.width() as f32 / window_and_image_info.image_size.x;
+                    let half_slice_width = (buffer.0 * x_mult) as u32;
+                    let x = (image.width() as f32 / 2.0 + (image_x_highlight_edge * x_mult)
+                        - half_slice_width as f32) as u32;
                     let y = 0;
-                    let slice_width = buffer.0 as u32;
-                    let slice_height = window_and_image_info.image_size.y as u32;
-                    let dyn_image =
-                        image.crop_imm(image_x_highlight_edge, y, slice_width, slice_height);
-
+                    let slice_width = half_slice_width * 2;
+                    let slice_height = image.height();
+                    let dyn_image = image.crop_imm(x, y, half_slice_width * 2, slice_height);
                     let size = Extent3d {
                         width: slice_width,
                         height: slice_height,
@@ -266,13 +273,10 @@ fn mouse_click_listen(
                     let texture_handle = images.add(texture);
                     let idx = slice_idx.0;
                     slice_idx.0 += 1;
+                    // Spawn new slice
                     commands.spawn((
                         Sprite {
                             image: texture_handle,
-                            custom_size: Some(Vec2::new(
-                                slice_width as f32 * 0.5,
-                                slice_height as f32 * 0.5,
-                            )),
                             ..default()
                         },
                         Transform::from_xyz(
@@ -281,7 +285,7 @@ fn mouse_click_listen(
                             10.0,
                             0.0,
                         )
-                        .with_scale(Vec3::new(0.5, 0.5, 0.0)),
+                        .with_scale(Vec3::new(0.5, 0.5, 0.5)),
                         ImageSlice(idx),
                     ));
                 }
@@ -299,13 +303,13 @@ fn update_slice_location(
     buffer: Res<HighlightBuffer>,
     time: Res<Time>,
     window_and_image_info: Res<WindowAndImageInfo>,
+    last_mouse_loc: Res<LastMouseLoc>,
 ) {
     for (mut transform, image_slice) in &mut slice_query {
         let target = Vec3::new(
-            (10.0 + (image_slice.0 as f32 * buffer.0 * 0.5))
+            (10.0 + (image_slice.0 as f32 * buffer.0))
                 - (window_and_image_info.window_size.x / 2.0),
-            10.0 + (window_and_image_info.image_size.y * transform.scale.y)
-                - (window_and_image_info.window_size.y / 2.0),
+            (last_mouse_loc.0.y) - window_and_image_info.window_size.y / 2.0,
             image_slice.0 as f32,
         );
         let diff = target - transform.translation;
