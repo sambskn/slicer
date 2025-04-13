@@ -1,4 +1,5 @@
-use bevy::input::mouse::MouseWheel;
+use bevy::input::mouse::{MouseButtonInput, MouseWheel};
+use bevy::input::ButtonState;
 use bevy::prelude::Image;
 use bevy::{
     asset::{Handle, RenderAssetUsages},
@@ -29,6 +30,7 @@ fn main() {
         .add_systems(Update, keyboard_navigation_system)
         .add_systems(Update, mouse_move_listen)
         .add_systems(Update, mouse_scroll_listen)
+        .add_systems(Update, mouse_click_listen)
         .add_systems(Startup, setup)
         .insert_resource(RarImageState::default())
         .run();
@@ -137,7 +139,6 @@ fn mouse_move_listen(
     }
 }
 
-
 fn mouse_scroll_listen(
     mut mouse_wheel_events: EventReader<MouseWheel>,
     mut highlight_buffer: ResMut<HighlightBuffer>,
@@ -145,12 +146,28 @@ fn mouse_scroll_listen(
     for event in mouse_wheel_events.read() {
         match event.y {
             0.0..=1.0 => {
-                highlight_buffer.0  = if highlight_buffer.0 == MAX_BUFFER { MAX_BUFFER } else { highlight_buffer.0 +1.0 };
-            },
+                highlight_buffer.0 = if highlight_buffer.0 == MAX_BUFFER {
+                    MAX_BUFFER
+                } else {
+                    highlight_buffer.0 + 1.0
+                };
+            }
             -1.0..0.0 => {
-                highlight_buffer.0  = if highlight_buffer.0 == MIN_BUFFER { MIN_BUFFER } else { highlight_buffer.0 - 1.0 };
-            },
+                highlight_buffer.0 = if highlight_buffer.0 == MIN_BUFFER {
+                    MIN_BUFFER
+                } else {
+                    highlight_buffer.0 - 1.0
+                };
+            }
             _ => {}
+        }
+    }
+}
+
+fn mouse_click_listen(mut mouse_button_input_events: EventReader<MouseButtonInput>) {
+    for event in mouse_button_input_events.read() {
+        if event.button == MouseButton::Left && event.state == ButtonState::Released {
+            info!("click up");
         }
     }
 }
