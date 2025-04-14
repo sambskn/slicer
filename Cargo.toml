@@ -4,7 +4,26 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-bevy = "0.15.3"
+bevy = { version = "^0.15.3", default-features = false, features = [
+    "bevy_asset",
+    "bevy_color",
+    "bevy_core_pipeline",
+    "bevy_render",
+    "bevy_sprite",
+    "bevy_sprite_picking_backend",
+    "bevy_state",
+    "bevy_text",
+    "bevy_ui",
+    "bevy_window",
+    "bevy_winit",
+    "custom_cursor",
+    "default_font",
+    "multi_threaded",
+    "png",
+    "sysinfo_plugin",
+    "jpeg",
+    "x11"
+] }
 unrar = "0.5.8"
 image = "0.24.7"
 tempfile = "3.8.1"
